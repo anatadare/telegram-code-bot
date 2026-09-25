@@ -29,4 +29,5 @@ max_retries = 2
 LLM_MODEL = "qwen3.8-27b-unsencored"      # ganti sesuai nama model persis di Jerouter
 LLM_API_BASE = "https://je.jerouter.web.id/v1"
 LLM_MAX_TOKENS = "8000"
+LLM_TIMEOUT_MS = "240000"                 # 4 menit, model-nya butuh waktu lumayan buat reasoning + nulis banyak file
 MAX_TOTAL_CHARS = "120000"
