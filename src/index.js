@@ -21,17 +21,21 @@ export default {
       } catch (err) {
         return new Response("Bad Request", { status: 400 });
       }
-      // PENTING: jangan await handleUpdate di sini. Kita jawab "OK" ke Telegram
-      // DULUAN (return cepat), baru proses (download file / panggil LLM / kirim
-      // hasil) berjalan di belakang layar lewat ctx.waitUntil.
-      // Kalau kita nunggu handleUpdate selesai dulu baru response, dan proses LLM-nya
-      // lama, Telegram bakal nganggep webhook gagal & ngirim ulang update yang sama
-      // berkali-kali -> makanya sebelumnya muncul "Lagi mikir..." berulang-ulang.
-      ctx.waitUntil(
-        handleUpdate(update, env, ctx).catch((err) => {
-          console.log("handleUpdate error:", err && err.stack ? err.stack : err);
-        })
-      );
+      // PENTING: proses beratnya (download file / panggil LLM / kirim hasil) TIDAK
+      // dijalanin langsung di sini pake ctx.waitUntil() lagi. Cloudflare cuma ngasih
+      // jatah tambahan ~30 detik buat waitUntil() setelah response ini dikirim, terus
+      // proses yang belum kelar langsung DIBUNUH PAKSA tanpa sempet ngasih tau error
+      // apapun -> makanya sebelumnya bot suka "freeze" diem selamanya kalau modelnya
+      // butuh reasoning/proses lebih dari 30 detik.
+      //
+      // Solusinya: taruh update-nya ke Queue, terus jawab "OK" ke Telegram. Proses
+      // beratnya dikerjain di handler queue() di bawah, yang jatah waktunya 15 MENIT
+      // (bukan 30 detik), jadi model boleh mikir lama tanpa bikin bot-nya kepotong.
+      try {
+        await env.JOB_QUEUE.send(update);
+      } catch (err) {
+        console.log("Gagal masukin update ke queue:", err && err.stack ? err.stack : err);
+      }
       return new Response("OK");
     }
 
@@ -40,6 +44,23 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
+  },
+
+  // Ini "pekerja" yang beneran ngerjain proses berat (download file, panggil LLM,
+  // kirim hasil), dipanggil Cloudflare pas ada pesan baru masuk ke queue. Wall-clock
+  // time limit-nya 15 menit -> jauh lebih dari cukup buat model reasoning yang lama.
+  async queue(batch, env, ctx) {
+    for (const message of batch.messages) {
+      try {
+        await handleUpdate(message.body, env, ctx);
+      } catch (err) {
+        console.log("queue handleUpdate error:", err && err.stack ? err.stack : err);
+      }
+      // Selalu ack (walau error) -> errornya udah ditangani & dikasih tau ke user
+      // lewat setStatus di processInstruction. Kalau nggak di-ack, queue bakal
+      // nyoba ulang otomatis dan bisa bikin user dapet pesan dobel.
+      message.ack();
+    }
   },
 };
 
