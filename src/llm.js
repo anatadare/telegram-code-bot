@@ -28,7 +28,7 @@ export function buildUserPrompt(files, instruction) {
   return parts.join("\n");
 }
 
-export async function editCode(env, files, instruction) {
+export async function editCode(env, files, instruction, onProgress) {
   const userPrompt = truncate(
     buildUserPrompt(files, instruction),
     Number(env.MAX_TOTAL_CHARS || 120000)
@@ -50,6 +50,7 @@ export async function editCode(env, files, instruction) {
         model: env.LLM_MODEL,
         temperature: 0.2,
         max_tokens: Number(env.LLM_MAX_TOKENS || 8000),
+        stream: true,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userPrompt },
@@ -58,25 +59,95 @@ export async function editCode(env, files, instruction) {
       signal: controller.signal,
     });
   } catch (err) {
+    clearTimeout(timeoutId);
     if (err.name === "AbortError") {
       throw new Error(
         `Model gak jawab dalam ${Math.round(timeoutMs / 1000)} detik (timeout). Coba lagi, atau kurangi ukuran file/instruksi.`
       );
     }
     throw new Error(`Gagal konek ke LLM API: ${err.message}`);
-  } finally {
-    clearTimeout(timeoutId);
   }
 
   if (!res.ok) {
+    clearTimeout(timeoutId);
     const errText = await res.text().catch(() => "");
     throw new Error(`LLM API error ${res.status}: ${errText.slice(0, 500)}`);
   }
 
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("LLM tidak mengembalikan konten.");
-  return content;
+  // Kalau provider gak dukung streaming (gak ada body stream), fallback ke cara biasa.
+  if (!res.body) {
+    clearTimeout(timeoutId);
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) throw new Error("LLM tidak mengembalikan konten.");
+    return content;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let full = "";
+  let lastFileNotified = null;
+  let lastProgressAt = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // baris terakhir mungkin belum lengkap, simpan buat chunk berikutnya
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if (!dataStr || dataStr === "[DONE]") continue;
+
+        let json;
+        try {
+          json = JSON.parse(dataStr);
+        } catch {
+          continue; // chunk gak lengkap/gak valid, skip
+        }
+        const delta = json?.choices?.[0]?.delta?.content;
+        if (!delta) continue;
+        full += delta;
+
+        if (onProgress) {
+          const now = Date.now();
+          const matches = [...full.matchAll(/===FILE:\s*(.+?)\s*===/g)];
+          const currentFile = matches.length ? matches[matches.length - 1][1].trim() : null;
+
+          if (currentFile && currentFile !== lastFileNotified) {
+            lastFileNotified = currentFile;
+            lastProgressAt = now;
+            await onProgress(`✍️ Nulis file: <b>${escapeHtmlLocal(currentFile)}</b> (${full.length} karakter)`);
+          } else if (now - lastProgressAt > 2500) {
+            lastProgressAt = now;
+            await onProgress(`🤖 Model lagi nulis code... (${full.length} karakter terkumpul)`);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(
+        `Model gak jawab dalam ${Math.round(timeoutMs / 1000)} detik (timeout). Coba lagi, atau kurangi ukuran file/instruksi.`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!full) throw new Error("LLM tidak mengembalikan konten.");
+  return full;
+}
+
+function escapeHtmlLocal(str) {
+  return String(str).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 // Parse blok ===FILE: path=== ... ===ENDFILE=== jadi { path: text }.
