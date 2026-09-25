@@ -14,18 +14,24 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    console.log("DEBUG path masuk:", url.pathname);
-    console.log("DEBUG path diharapkan:", `/webhook/${env.WEBHOOK_SECRET}`);
-
     if (request.method === "POST" && url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
+      let update;
       try {
-        const update = await request.json();
-        // Jangan block response ke Telegram nunggu semua proses selesai kalau bisa dihindari,
-        // tapi karena harus reply hasil edit, kita proses sekalian di sini.
-        await handleUpdate(update, env, ctx);
+        update = await request.json();
       } catch (err) {
-        console.log("handleUpdate error:", err && err.stack ? err.stack : err);
+        return new Response("Bad Request", { status: 400 });
       }
+      // PENTING: jangan await handleUpdate di sini. Kita jawab "OK" ke Telegram
+      // DULUAN (return cepat), baru proses (download file / panggil LLM / kirim
+      // hasil) berjalan di belakang layar lewat ctx.waitUntil.
+      // Kalau kita nunggu handleUpdate selesai dulu baru response, dan proses LLM-nya
+      // lama, Telegram bakal nganggep webhook gagal & ngirim ulang update yang sama
+      // berkali-kali -> makanya sebelumnya muncul "Lagi mikir..." berulang-ulang.
+      ctx.waitUntil(
+        handleUpdate(update, env, ctx).catch((err) => {
+          console.log("handleUpdate error:", err && err.stack ? err.stack : err);
+        })
+      );
       return new Response("OK");
     }
 
