@@ -3,7 +3,7 @@ import {
   sendMessage,
   sendDocument,
   downloadTelegramFile,
-  tgCall,
+  editMessageText,
 } from "./telegram.js";
 import { unzipToFileMap, fileMapToZip } from "./zipfiles.js";
 import { editCode, parseEditedFiles, extractExplanation } from "./llm.js";
@@ -157,26 +157,35 @@ async function handleDocument(message, env, chatId) {
 }
 
 async function processInstruction(env, chatId, pending, instruction) {
-  await sendMessage(env, chatId, "🤖 Lagi mikir & ngedit code...");
+  const startMsgs = await sendMessage(env, chatId, "📖 Membaca file & instruksi kamu...");
+  const messageId = startMsgs?.[0]?.result?.message_id;
+
+  const setStatus = async (text) => {
+    if (!messageId) return;
+    try {
+      await editMessageText(env, chatId, messageId, text);
+    } catch {
+      // kalau gagal edit (misal kena rate limit), diemin aja, gak fatal
+    }
+  };
+
+  await setStatus("🔍 Menganalisa struktur code & instruksi kamu...");
 
   let raw;
   try {
-    raw = await editCode(env, pending.files, instruction);
+    raw = await editCode(env, pending.files, instruction, setStatus);
   } catch (err) {
-    await sendMessage(env, chatId, `❌ Gagal manggil model: ${err.message}`);
+    await setStatus(`❌ Gagal: ${err.message}`);
     return;
   }
+
+  await setStatus("🧩 Model selesai nulis, lagi nyusun & mengecek hasil...");
 
   const parsed = parseEditedFiles(raw);
   const explanation = extractExplanation(raw);
 
   if (Object.keys(parsed).length === 0) {
-    // Model gak ngikutin format -> tampilkan mentah aja biar user tetap dapet sesuatu.
-    await sendMessage(
-      env,
-      chatId,
-      "⚠️ Model gak balikin format file yang dikenali. Ini jawaban mentahnya:"
-    );
+    await setStatus("⚠️ Model gak balikin format file yang dikenali. Ini jawaban mentahnya di bawah:");
     await sendMessage(env, chatId, raw);
     return;
   }
@@ -189,6 +198,7 @@ async function processInstruction(env, chatId, pending, instruction) {
 
   const changedList = Object.keys(parsed).join(", ");
   const captionBase = `✅ Selesai. File diubah/ditambah: ${changedList}`;
+  await setStatus(`📦 Nyiapin file hasil (${changedList})...`);
 
   try {
     if (pending.type === "single" && Object.keys(pending.files).length === 1) {
@@ -200,8 +210,9 @@ async function processInstruction(env, chatId, pending, instruction) {
       const outName = pending.type === "zip" ? `edited_${pending.filename}` : `edited_${pending.filename}.zip`;
       await sendDocument(env, chatId, outName, zipBytes, captionBase);
     }
+    await setStatus("✅ Selesai! Hasil edit dikirim di bawah 👇");
   } catch (err) {
-    await sendMessage(env, chatId, `❌ Gagal kirim file hasil: ${err.message}`);
+    await setStatus(`❌ Gagal kirim file hasil: ${err.message}`);
   }
 
   if (explanation) {
