@@ -2,7 +2,7 @@
 
 Bot Telegram yang nerima file code / .zip project, lalu ngedit/nambahin code
 sesuai instruksi kamu lewat model AI (via Jerouter, format OpenAI-compatible),
-dan kirim balik hasilnya sebagai file.
+dan kirim balik hasilnya sebagai file. 
 
 ## Alur pakai
 1. Kirim file `.js`/`.py`/dll ATAU file `.zip` ke bot.
