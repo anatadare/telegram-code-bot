@@ -34,22 +34,39 @@ export async function editCode(env, files, instruction) {
     Number(env.MAX_TOTAL_CHARS || 120000)
   );
 
-  const res = await fetch(`${env.LLM_API_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.LLM_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: env.LLM_MODEL,
-      temperature: 0.2,
-      max_tokens: Number(env.LLM_MAX_TOKENS || 8000),
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
+  const timeoutMs = Number(env.LLM_TIMEOUT_MS || 90000); // 90 detik default
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(`${env.LLM_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.LLM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: env.LLM_MODEL,
+        temperature: 0.2,
+        max_tokens: Number(env.LLM_MAX_TOKENS || 8000),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(
+        `Model gak jawab dalam ${Math.round(timeoutMs / 1000)} detik (timeout). Coba lagi, atau kurangi ukuran file/instruksi.`
+      );
+    }
+    throw new Error(`Gagal konek ke LLM API: ${err.message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
