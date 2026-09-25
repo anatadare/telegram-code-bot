@@ -69,6 +69,15 @@ export async function downloadTelegramFile(env, fileId) {
   return await res.arrayBuffer();
 }
 
+export function editMessageText(env, chatId, messageId, text) {
+  return tgCall(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: text.slice(0, 4000),
+    parse_mode: "HTML",
+  });
+}
+
 export async function setWebhook(env, url) {
   return tgCall(env, "setWebhook", {
     url,
