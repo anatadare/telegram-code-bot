@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 # lalu tempel id-nya di bawah ini.
 [[kv_namespaces]]
 binding = "BOT_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "d22e4db21dcb4786a57137c3715c0e88"
 
 # Var non-secret. Yang secret (token, api key) pakai `wrangler secret put`, JANGAN ditaruh di sini.
 [vars]
