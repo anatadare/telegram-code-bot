@@ -10,6 +10,20 @@ compatibility_flags = ["nodejs_compat"]
 binding = "BOT_KV"
 id = "d22e4db21dcb4786a57137c3715c0e88"
 
+# Queue buat proses berat (download file, panggil LLM, dll) di background.
+# PENTING: queue "telegram-code-bot-jobs" harus dibikin DULU di Cloudflare Dashboard
+# (Workers & Pages > Queues > Create Queue) SEBELUM deploy ini, kalau belum ada
+# deploy bakal gagal karena queue-nya belum eksis.
+[[queues.producers]]
+queue = "telegram-code-bot-jobs"
+binding = "JOB_QUEUE"
+
+[[queues.consumers]]
+queue = "telegram-code-bot-jobs"
+max_batch_size = 1
+max_batch_timeout = 0
+max_retries = 2
+
 # Var non-secret. Yang secret (token, api key) pakai `wrangler secret put`, JANGAN ditaruh di sini.
 [vars]
 LLM_MODEL = "qwen3.8-27b-unsencored"      # ganti sesuai nama model persis di Jerouter
