@@ -95,9 +95,42 @@ export async function editCode(env, files, instruction, onProgress) {
   let lastProgressAt = 0;
   let reasoningChars = 0;
 
+  // Idle timeout PER-CHUNK: AbortController doang ternyata gak selalu berhasil
+  // motong reader.read() yang lagi nunggu chunk berikutnya di runtime ini. Jadi
+  // kita "race" tiap read() manual sama timer sendiri -> kalau gak ada chunk baru
+  // dalam idleTimeoutMs, kita paksa berhenti walau AbortController-nya gak mempan.
+  const idleTimeoutMs = Number(env.LLM_IDLE_TIMEOUT_MS || 45000); // 45 detik default
+  async function readWithIdleTimeout() {
+    let timer;
+    const idlePromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("__IDLE_TIMEOUT__")), idleTimeoutMs);
+    });
+    try {
+      return await Promise.race([reader.read(), idlePromise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let done, value;
+      try {
+        ({ done, value } = await readWithIdleTimeout());
+      } catch (err) {
+        if (err.message === "__IDLE_TIMEOUT__") {
+          console.log(
+            `[editCode] IDLE TIMEOUT: gak ada chunk baru dalam ${idleTimeoutMs}ms (terakhir: ${reasoningChars} char reasoning, ${full.length} char content)`
+          );
+          try {
+            await reader.cancel();
+          } catch {}
+          throw new Error(
+            `Model berhenti ngirim data selama ${Math.round(idleTimeoutMs / 1000)} detik (kemungkinan API-nya nge-hang). Coba lagi, atau kurangi ukuran instruksi/file.`
+          );
+        }
+        throw err;
+      }
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
