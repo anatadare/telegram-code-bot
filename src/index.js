@@ -96,6 +96,14 @@ async function handleUpdate(update, env, ctx) {
       );
       return;
     }
+    if (pending.processing) {
+      await sendMessage(
+        env,
+        chatId,
+        "⏳ Masih ada proses edit yang lagi jalan, tunggu dulu ya sampai selesai (atau /reset kalau mau batalin & mulai ulang)."
+      );
+      return;
+    }
     await processInstruction(env, chatId, pending, text);
     return;
   }
@@ -157,6 +165,20 @@ async function handleDocument(message, env, chatId) {
 }
 
 async function processInstruction(env, chatId, pending, instruction) {
+  // Tandain lagi proses, biar instruksi lain yang nyusul gak numpuk jadi proses baru.
+  pending.processing = true;
+  await setPending(env, chatId, pending);
+
+  try {
+    await processInstructionInner(env, chatId, pending, instruction);
+  } finally {
+    // Apapun hasilnya (sukses/gagal/timeout), lepas flag processing di akhir.
+    pending.processing = false;
+    await setPending(env, chatId, pending);
+  }
+}
+
+async function processInstructionInner(env, chatId, pending, instruction) {
   const startMsgs = await sendMessage(env, chatId, "📖 Membaca file & instruksi kamu...");
   const messageId = startMsgs?.[0]?.result?.message_id;
 
@@ -164,8 +186,8 @@ async function processInstruction(env, chatId, pending, instruction) {
     if (!messageId) return;
     try {
       await editMessageText(env, chatId, messageId, text);
-    } catch {
-      // kalau gagal edit (misal kena rate limit), diemin aja, gak fatal
+    } catch (err) {
+      console.log("setStatus gagal edit pesan:", err && err.message ? err.message : err);
     }
   };
 
@@ -175,6 +197,7 @@ async function processInstruction(env, chatId, pending, instruction) {
   try {
     raw = await editCode(env, pending.files, instruction, setStatus);
   } catch (err) {
+    console.log("editCode error:", err && err.stack ? err.stack : err);
     await setStatus(`❌ Gagal: ${err.message}`);
     return;
   }
