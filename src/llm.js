@@ -28,13 +28,42 @@ export function buildUserPrompt(files, instruction) {
   return parts.join("\n");
 }
 
+// PENTING: AbortController + idle-timeout per-chunk di dalam editCodeInner() ternyata
+// TIDAK selalu berhasil motong koneksi yang beneran macet di runtime ini (pernah
+// kejadian bot "bengong" 10+ menit tanpa error apapun keluar, padahal harusnya
+// ke-timeout dalam hitungan detik/menit). Makanya di sini kita bungkus SELURUH
+// proses streaming dengan Promise.race melawan timer independen sendiri (gak
+// bergantung sama sekali ke AbortController/reader internal). Kalau timer ini
+// yang menang duluan, error langsung dilempar ke caller -> setStatus & flag
+// pending.processing tetap ke-reset walau proses di dalam editCodeInner masih
+// "menggantung" di background (nanti mati sendiri pas invocation-nya berakhir).
 export async function editCode(env, files, instruction, onProgress) {
+  const timeoutMs = Number(env.LLM_TIMEOUT_MS || 90000); // 90 detik default
+  let hardTimer;
+  const hardDeadline = new Promise((_, reject) => {
+    hardTimer = setTimeout(() => {
+      console.log(`[editCode] HARD DEADLINE ${timeoutMs}ms kelewat, paksa gagal (koneksi macet total).`);
+      reject(
+        new Error(
+          `Model gak jawab dalam ${Math.round(timeoutMs / 1000)} detik (hard timeout, koneksi macet). Coba lagi, atau kurangi ukuran file/instruksi.`
+        )
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([editCodeInner(env, files, instruction, onProgress, timeoutMs), hardDeadline]);
+  } finally {
+    clearTimeout(hardTimer);
+  }
+}
+
+async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
   const userPrompt = truncate(
     buildUserPrompt(files, instruction),
     Number(env.MAX_TOTAL_CHARS || 120000)
   );
 
-  const timeoutMs = Number(env.LLM_TIMEOUT_MS || 90000); // 90 detik default
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
     console.log(`[editCode] TIMEOUT setelah ${timeoutMs}ms, abort request`);
