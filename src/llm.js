@@ -36,7 +36,11 @@ export async function editCode(env, files, instruction, onProgress) {
 
   const timeoutMs = Number(env.LLM_TIMEOUT_MS || 90000); // 90 detik default
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => {
+    console.log(`[editCode] TIMEOUT setelah ${timeoutMs}ms, abort request`);
+    controller.abort();
+  }, timeoutMs);
+  console.log(`[editCode] mulai request ke LLM, timeout=${timeoutMs}ms, model=${env.LLM_MODEL}`);
 
   let res;
   try {
@@ -89,6 +93,7 @@ export async function editCode(env, files, instruction, onProgress) {
   let full = "";
   let lastFileNotified = null;
   let lastProgressAt = 0;
+  let reasoningChars = 0;
 
   try {
     while (true) {
@@ -112,7 +117,23 @@ export async function editCode(env, files, instruction, onProgress) {
           continue; // chunk gak lengkap/gak valid, skip
         }
         const delta = json?.choices?.[0]?.delta?.content;
-        if (!delta) continue;
+        const reasoningDelta = json?.choices?.[0]?.delta?.reasoning_content;
+
+        // Model ini kadang "mikir" dulu (reasoning_content) sebelum nulis jawaban
+        // beneran (content). Kalau ini diabaikan, status di Telegram gak keupdate
+        // sama sekali selama fase mikir -> kelihatan kayak macet padahal jalan.
+        if (!delta) {
+          if (reasoningDelta && onProgress) {
+            reasoningChars += reasoningDelta.length;
+            const now = Date.now();
+            if (now - lastProgressAt > 2500) {
+              lastProgressAt = now;
+              console.log(`[editCode] masih reasoning, ${reasoningChars} karakter`);
+              await onProgress(`🧠 Model lagi mikir... (${reasoningChars} karakter reasoning)`);
+            }
+          }
+          continue;
+        }
         full += delta;
 
         if (onProgress) {
@@ -123,6 +144,7 @@ export async function editCode(env, files, instruction, onProgress) {
           if (currentFile && currentFile !== lastFileNotified) {
             lastFileNotified = currentFile;
             lastProgressAt = now;
+            console.log(`[editCode] mulai nulis file: ${currentFile}`);
             await onProgress(`✍️ Nulis file: <b>${escapeHtmlLocal(currentFile)}</b> (${full.length} karakter)`);
           } else if (now - lastProgressAt > 2500) {
             lastProgressAt = now;
