@@ -28,6 +28,9 @@ max_retries = 2
 [vars]
 LLM_MODEL = "deepseek-unrestricted"      # ganti sesuai nama model persis di Jerouter
 LLM_API_BASE = "https://je.jerouter.web.id/v1"
-LLM_MAX_TOKENS = "8000"
+# Kalau file yang diedit panjang, 8000 gampang abis di tengah nulis (bikin
+# respons kepotong sebelum "===ENDFILE==="). Naikkan lagi kalau model/provider-nya
+# dukung context/output lebih besar dan kamu masih sering ketemu file kepotong.
+LLM_MAX_TOKENS = "16000"
 LLM_TIMEOUT_MS = "240000"                # 4 menit, model-nya butuh waktu lumayan buat reasoning + nulis banyak file
 MAX_TOTAL_CHARS = "120000"
