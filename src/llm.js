@@ -69,7 +69,9 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
     console.log(`[editCode] TIMEOUT setelah ${timeoutMs}ms, abort request`);
     controller.abort();
   }, timeoutMs);
-  console.log(`[editCode] mulai request ke LLM, timeout=${timeoutMs}ms, model=${env.LLM_MODEL}`);
+  
+  // LOG DIUPDATE: Menyesuaikan dengan model baru
+  console.log(`[editCode] mulai request ke LLM, timeout=${timeoutMs}ms, model=deepseek-unrestricted`);
 
   let res;
   try {
@@ -80,7 +82,8 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
         Authorization: `Bearer ${env.LLM_API_KEY}`,
       },
       body: JSON.stringify({
-        model: env.LLM_MODEL,
+        // MODEL DIUPDATE: Hardcode ke deepseek-unrestricted
+        model: "deepseek-unrestricted",
         temperature: 0.2,
         max_tokens: Number(env.LLM_MAX_TOKENS || 8000),
         stream: true,
