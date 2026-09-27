@@ -358,8 +358,11 @@ async function processInstructionInner(env, chatId, pending, instruction) {
   await setStatus("🔍 Menganalisa struktur code & instruksi kamu...");
 
   let raw;
+  let finishReason = null;
   try {
-    raw = await editCode(env, pending.files, instruction, setStatus);
+    const result = await editCode(env, pending.files, instruction, setStatus);
+    raw = result.content;
+    finishReason = result.finishReason;
   } catch (err) {
     console.log("editCode error:", err && err.stack ? err.stack : err);
     await setStatus(`❌ Gagal: ${err.message}`);
@@ -368,11 +371,49 @@ async function processInstructionInner(env, chatId, pending, instruction) {
 
   await setStatus("🧩 Model selesai nulis, lagi nyusun & mengecek hasil...");
 
-  const parsed = parseEditedFiles(raw);
+  const { files: parsed, partial } = parseEditedFiles(raw);
   const explanations = parseExplanations(raw);
   const leftover = extractExplanation(raw); // teks di luar blok FILE/EXPLAIN, normalnya kosong
 
   if (Object.keys(parsed).length === 0) {
+    // Kalau ada blok "===FILE: xxx===" yang kebuka tapi gak sempat ketutup
+    // "===ENDFILE===", itu tandanya model KEPOTONG di tengah nulis file itu
+    // (paling sering: kehabisan LLM_MAX_TOKENS, atau idle/hard timeout pas
+    // nulis file panjang) -- BUKAN model salah format total. Di kasus ini
+    // tetap kirim isi yang sempat ditulis SEBAGAI FILE (bukan teks panjang
+    // yang susah di-copy), plus kasih tau kenapa & saran lanjutannya.
+    if (partial && partial.content && partial.content.trim()) {
+      const filename = telegramSafeFilename(partial.path);
+      const bytes = new TextEncoder().encode(partial.content);
+      const reasonNote =
+        finishReason === "length"
+          ? " (model kehabisan token/LLM_MAX_TOKENS sebelum selesai nulis file ini)"
+          : " (responsnya berhenti sebelum file ini selesai ditulis)";
+
+      await setStatus(
+        `⚠️ File <b>${escapeHtml(partial.path)}</b> kepotong di tengah jalan${escapeHtml(
+          reasonNote
+        )}. Ini kukirim SEBAGIAN isi yang sempat ditulis model sebagai file -- ` +
+          `coba kirim ulang instruksi yang sama (boleh dipecah jadi beberapa instruksi lebih kecil), ` +
+          `atau naikkan LLM_MAX_TOKENS di wrangler.toml kalau ini sering kejadian.`
+      );
+      try {
+        await sendDocument(
+          env,
+          chatId,
+          filename,
+          bytes,
+          `⚠️ <b>${escapeHtml(partial.path)}</b> (SEBAGIAN -- kepotong, belum sampai akhir)`
+        );
+      } catch (err) {
+        await setStatus(`❌ Gagal kirim file (sebagian): ${err.message}`);
+      }
+      return;
+    }
+
+    // Bener-bener gak ada blok ===FILE=== sama sekali -- model beneran gak
+    // ngikutin format yang diminta (bukan soal kepotong). Ini fallback lama:
+    // tampilkan jawaban mentahnya biar user tetap bisa lihat apa yang dijawab model.
     await setStatus("⚠️ Model gak balikin format file yang dikenali. Ini jawaban mentahnya di bawah:");
     await sendMessage(env, chatId, raw);
     return;
