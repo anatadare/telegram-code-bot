@@ -2,22 +2,77 @@
 // Bangun prompt dari kumpulan file, panggil LLM (format OpenAI-compatible,
 // cocok buat Jerouter), lalu parse balasannya jadi { path: content }.
 
-const SYSTEM_PROMPT = `Kamu adalah asisten coding di dalam bot Telegram.
+// Deskripsi diri bot ini -- dipakai di SEMUA mode (edit maupun brainstorm),
+// biar modelnya "sadar" dia lagi jalan di dalam bot Telegram yang mana, apa
+// aja alur & batasannya. Ini bikin jawaban model (termasuk pas ditanya
+// "kamu bisa ngapain aja?" atau lagi brainstorm) nyambung sama kenyataan,
+// bukan jawaban generik asisten coding biasa.
+const BOT_SELF_INTRO = `Kamu adalah otak di balik "Telegram Code-Edit Bot", sebuah bot Telegram
+yang jalan di Cloudflare Worker. Begini cara bot ini dipakai orang:
+1. User kirim file kode (.js/.py/dst) atau file .zip berisi project ke bot.
+2. User kirim instruksi teks (atau langsung taruh di caption file) tentang apa yang mau diubah/ditambah.
+3. Bot ngirim isi file + instruksi itu ke kamu, kamu balikin hasil editnya, bot kirim balik sebagai file/zip ke user.
+4. User bisa lanjut kasih instruksi susulan ke hasil yang sama (kamu akan menerima versi
+   file yang sudah kamu edit sebelumnya) sampai user ketik /reset.
+5. User juga bisa ngobrol/brainstorming sama kamu (lewat /brainstorm atau langsung chat
+   kalau belum ada file yang lagi diproses) tanpa harus menghasilkan file -- itu mode terpisah.
+
+Batasan teknis yang perlu kamu tahu (biar kalau ditanya user, jawabanmu akurat):
+- Hanya file berekstensi kode/teks umum (js, ts, py, json, html, css, md, dll -- daftar
+  lengkap ada di src/zipfiles.js) yang dibaca & dikirim ke kamu; file biner (gambar, font, dll)
+  ikut di-zip ulang apa adanya tanpa kamu sentuh.
+- Ada batas total karakter yang dikirim ke kamu per request (MAX_TOTAL_CHARS, default ~120rb
+  karakter) -- kalau project user gede, isinya bisa terpotong.
+- Ada batas waktu (timeout) beberapa menit untuk satu kali kamu menjawab.
+Kalau ada permintaan yang kemungkinan kena batasan itu (project kegedean, minta ekstensi
+file yang gak umum, dll), boleh kamu singgung ke user lewat penjelasan di jawabanmu.`;
+
+const SYSTEM_PROMPT = `${BOT_SELF_INTRO}
+
+MODE SEKARANG: EDIT CODE.
 Kamu akan menerima satu atau beberapa file kode beserta instruksi dari user.
 
 Tugasmu:
 - Edit dan/atau tambahkan kode sesuai instruksi user.
 - Untuk file yang TIDAK diminta diubah, JANGAN disertakan lagi di output.
 - Untuk file yang kamu ubah atau file baru yang kamu buat, sertakan ISI LENGKAP file tersebut (bukan potongan/diff).
+- User akan menerima tiap file hasil edit sebagai FILE TERPISAH (bukan digabung jadi satu
+  pesan/zip), jadi WAJIB kasih penjelasan buat tiap file -- lihat blok EXPLAIN di bawah.
 
 ATURAN FORMAT OUTPUT (WAJIB DIIKUTI PERSIS, jangan pakai markdown code fence):
+
+Untuk SETIAP file yang kamu ubah/tambahkan, tulis DUA blok berurutan seperti ini:
 
 ===FILE: <path/nama/file.ext>===
 <isi lengkap file setelah diedit>
 ===ENDFILE===
+===EXPLAIN: <path/nama/file.ext -- HARUS SAMA PERSIS dengan path di atas>===
+<penjelasan singkat 2-5 kalimat: apa yang kamu ubah/tambahkan di file ini, dan apa
+fungsi/tujuan bagian yang kamu ubah itu di dalam file tersebut>
+===ENDEXPLAIN===
 
-Ulangi blok ===FILE: ...=== ... ===ENDFILE=== untuk setiap file yang diubah/ditambah.
-Jangan menulis penjelasan, basa-basi, atau catatan di luar blok tersebut kecuali user secara eksplisit minta penjelasan -- kalau diminta, taruh penjelasan itu SETELAH semua blok FILE.`;
+Ulangi pasangan blok FILE+EXPLAIN itu untuk SETIAP file yang diubah/ditambah, berurutan
+(FILE dulu baru EXPLAIN-nya, per file). Jangan menulis apapun di luar blok-blok itu --
+tidak perlu ada sapaan/pembuka/penutup, karena penjelasan sudah punya tempatnya sendiri
+di blok EXPLAIN masing-masing file.`;
+
+// Mode kedua: ngobrol/brainstorming bebas, TANPA format ===FILE===. Dipakai
+// waktu user belum kirim file, atau sengaja minta diskusi (/brainstorm) --
+// misalnya ngobrolin ide fitur, opsi arsitektur, cara nge-debug sesuatu, dll,
+// tanpa langsung minta bot nulis ulang file.
+const BRAINSTORM_SYSTEM_PROMPT = `${BOT_SELF_INTRO}
+
+MODE SEKARANG: BRAINSTORMING / DISKUSI BEBAS (bukan mode edit file).
+Di mode ini kamu NGGAK perlu dan NGGAK boleh pakai format ===FILE=== / ===ENDFILE===.
+Cukup jawab & diskusi natural kayak ngobrol biasa:
+- Boleh nawarin beberapa opsi/pendekatan berikut plus-minusnya kalau relevan.
+- Boleh nanya balik ke user kalau instruksinya ambigu, sebelum masuk detail teknis.
+- Kalau user lagi punya file yang sedang diproses bot ini (akan dikasih tahu di bawah,
+  kalau ada), boleh dijadikan konteks diskusi, tapi kamu TIDAK sedang diminta menulis
+  ulang file itu kecuali user memang minta secara eksplisit -- kalau user mulai minta
+  perubahan konkret ke code, arahkan dia untuk lanjut lewat alur edit biasa (kirim
+  instruksi tanpa /brainstorm, atau /reset dulu kalau mau mulai dari file baru).
+- Jawaban singkat-padat lebih baik daripada bertele-tele; ini chat Telegram, bukan dokumen.`;
 
 export function buildUserPrompt(files, instruction) {
   const parts = [`Instruksi user:\n${instruction}\n\nBerikut file-filenya:\n`];
@@ -28,21 +83,44 @@ export function buildUserPrompt(files, instruction) {
   return parts.join("\n");
 }
 
-// PENTING: AbortController + idle-timeout per-chunk di dalam editCodeInner() ternyata
-// TIDAK selalu berhasil motong koneksi yang beneran macet di runtime ini (pernah
-// kejadian bot "bengong" 10+ menit tanpa error apapun keluar, padahal harusnya
-// ke-timeout dalam hitungan detik/menit). Makanya di sini kita bungkus SELURUH
-// proses streaming dengan Promise.race melawan timer independen sendiri (gak
-// bergantung sama sekali ke AbortController/reader internal). Kalau timer ini
-// yang menang duluan, error langsung dilempar ke caller -> setStatus & flag
-// pending.processing tetap ke-reset walau proses di dalam editCodeInner masih
-// "menggantung" di background (nanti mati sendiri pas invocation-nya berakhir).
 export async function editCode(env, files, instruction, onProgress) {
+  const userPrompt = truncate(
+    buildUserPrompt(files, instruction),
+    Number(env.MAX_TOTAL_CHARS || 120000)
+  );
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content: userPrompt },
+  ];
+  return callLLM(env, messages, onProgress, "editCode");
+}
+
+// Mode brainstorming: `history` adalah array {role: "user"|"assistant", content}
+// (riwayat obrolan, sudah termasuk pesan terbaru user di akhir). `filesContext`
+// opsional -- ringkasan/isi file yang lagi pending, biar bisa jadi bahan diskusi.
+export async function chatWithModel(env, history, filesContext, onProgress) {
+  const messages = [{ role: "system", content: BRAINSTORM_SYSTEM_PROMPT }];
+  if (filesContext) {
+    messages.push({
+      role: "system",
+      content: `Konteks: user lagi punya file berikut yang sedang diproses bot ini (JANGAN ditulis ulang kecuali diminta eksplisit):\n\n${truncate(
+        filesContext,
+        Number(env.MAX_TOTAL_CHARS || 120000)
+      )}`,
+    });
+  }
+  messages.push(...history);
+  return callLLM(env, messages, onProgress, "chat");
+}
+
+// Wrapper hard-deadline yang dipakai kedua mode (edit & chat) -- lihat catatan
+// panjang di bawah soal kenapa perlu timer independen di luar AbortController.
+async function callLLM(env, messages, onProgress, label) {
   const timeoutMs = Number(env.LLM_TIMEOUT_MS || 90000); // 90 detik default
   let hardTimer;
   const hardDeadline = new Promise((_, reject) => {
     hardTimer = setTimeout(() => {
-      console.log(`[editCode] HARD DEADLINE ${timeoutMs}ms kelewat, paksa gagal (koneksi macet total).`);
+      console.log(`[${label}] HARD DEADLINE ${timeoutMs}ms kelewat, paksa gagal (koneksi macet total).`);
       reject(
         new Error(
           `Model gak jawab dalam ${Math.round(timeoutMs / 1000)} detik (hard timeout, koneksi macet). Coba lagi, atau kurangi ukuran file/instruksi.`
@@ -52,26 +130,28 @@ export async function editCode(env, files, instruction, onProgress) {
   });
 
   try {
-    return await Promise.race([editCodeInner(env, files, instruction, onProgress, timeoutMs), hardDeadline]);
+    return await Promise.race([callLLMInner(env, messages, onProgress, timeoutMs, label), hardDeadline]);
   } finally {
     clearTimeout(hardTimer);
   }
 }
 
-async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
-  const userPrompt = truncate(
-    buildUserPrompt(files, instruction),
-    Number(env.MAX_TOTAL_CHARS || 120000)
-  );
-
+// PENTING: AbortController + idle-timeout per-chunk di dalam callLLMInner() ternyata
+// TIDAK selalu berhasil motong koneksi yang beneran macet di runtime ini (pernah
+// kejadian bot "bengong" 10+ menit tanpa error apapun keluar, padahal harusnya
+// ke-timeout dalam hitungan detik/menit). Makanya di sini kita bungkus SELURUH
+// proses streaming dengan Promise.race melawan timer independen sendiri (gak
+// bergantung sama sekali ke AbortController/reader internal). Kalau timer ini
+// yang menang duluan, error langsung dilempar ke caller -> setStatus & flag
+// pending.processing tetap ke-reset walau proses di dalam callLLMInner masih
+// "menggantung" di background (nanti mati sendiri pas invocation-nya berakhir).
+async function callLLMInner(env, messages, onProgress, timeoutMs, label) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
-    console.log(`[editCode] TIMEOUT setelah ${timeoutMs}ms, abort request`);
+    console.log(`[${label}] TIMEOUT setelah ${timeoutMs}ms, abort request`);
     controller.abort();
   }, timeoutMs);
-  
-  // Baca nama model langsung dari env (sinkron dengan wrangler.toml)
-  console.log(`[editCode] mulai request ke LLM, timeout=${timeoutMs}ms, model=${env.LLM_MODEL}`);
+  console.log(`[${label}] mulai request ke LLM, timeout=${timeoutMs}ms, model=${env.LLM_MODEL}`);
 
   let res;
   try {
@@ -82,14 +162,11 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
         Authorization: `Bearer ${env.LLM_API_KEY}`,
       },
       body: JSON.stringify({
-        model: env.LLM_MODEL, // <-- Menggunakan variabel dari env
+        model: env.LLM_MODEL,
         temperature: 0.2,
         max_tokens: Number(env.LLM_MAX_TOKENS || 8000),
         stream: true,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userPrompt },
-        ],
+        messages,
       }),
       signal: controller.signal,
     });
@@ -151,7 +228,7 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
       } catch (err) {
         if (err.message === "__IDLE_TIMEOUT__") {
           console.log(
-            `[editCode] IDLE TIMEOUT: gak ada chunk baru dalam ${idleTimeoutMs}ms (terakhir: ${reasoningChars} char reasoning, ${full.length} char content)`
+            `[${label}] IDLE TIMEOUT: gak ada chunk baru dalam ${idleTimeoutMs}ms (terakhir: ${reasoningChars} char reasoning, ${full.length} char content)`
           );
           try {
             await reader.cancel();
@@ -192,7 +269,7 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
             const now = Date.now();
             if (now - lastProgressAt > 2500) {
               lastProgressAt = now;
-              console.log(`[editCode] masih reasoning, ${reasoningChars} karakter`);
+              console.log(`[${label}] masih reasoning, ${reasoningChars} karakter`);
               await onProgress(`🧠 Model lagi mikir... (${reasoningChars} karakter reasoning)`);
             }
           }
@@ -208,11 +285,12 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
           if (currentFile && currentFile !== lastFileNotified) {
             lastFileNotified = currentFile;
             lastProgressAt = now;
-            console.log(`[editCode] mulai nulis file: ${currentFile}`);
+            console.log(`[${label}] mulai nulis file: ${currentFile}`);
             await onProgress(`✍️ Nulis file: <b>${escapeHtmlLocal(currentFile)}</b> (${full.length} karakter)`);
           } else if (now - lastProgressAt > 2500) {
             lastProgressAt = now;
-            await onProgress(`🤖 Model lagi nulis code... (${full.length} karakter terkumpul)`);
+            const verb = label === "chat" ? "lagi mikir & nulis jawaban" : "lagi nulis code";
+            await onProgress(`🤖 Model ${verb}... (${full.length} karakter terkumpul)`);
           }
         }
       }
@@ -249,9 +327,26 @@ export function parseEditedFiles(raw) {
   return out;
 }
 
-// Sisa teks di luar blok FILE (misal penjelasan tambahan dari model).
+// Parse blok ===EXPLAIN: path=== ... ===ENDEXPLAIN=== jadi { path: penjelasan }.
+export function parseExplanations(raw) {
+  const out = {};
+  const re = /===EXPLAIN:\s*(.+?)\s*===\r?\n([\s\S]*?)\r?\n?===ENDEXPLAIN===/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    const path = match[1].trim();
+    out[path] = match[2].trim();
+  }
+  return out;
+}
+
+// Sisa teks di luar blok FILE & EXPLAIN (fallback, misal model nyelipin catatan
+// tambahan yang gak diminta -- normalnya bakal kosong karena format udah wajib
+// per-file lewat blok EXPLAIN).
 export function extractExplanation(raw) {
-  return raw.replace(/===FILE:[\s\S]*?===ENDFILE===/g, "").trim();
+  return raw
+    .replace(/===FILE:[\s\S]*?===ENDFILE===/g, "")
+    .replace(/===EXPLAIN:[\s\S]*?===ENDEXPLAIN===/g, "")
+    .trim();
 }
 
 function truncate(str, max) {
