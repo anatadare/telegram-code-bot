@@ -70,8 +70,8 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
     controller.abort();
   }, timeoutMs);
   
-  // LOG DIUPDATE: Menyesuaikan dengan model baru
-  console.log(`[editCode] mulai request ke LLM, timeout=${timeoutMs}ms, model=deepseek-unrestricted`);
+  // Baca nama model langsung dari env (sinkron dengan wrangler.toml)
+  console.log(`[editCode] mulai request ke LLM, timeout=${timeoutMs}ms, model=${env.LLM_MODEL}`);
 
   let res;
   try {
@@ -82,8 +82,7 @@ async function editCodeInner(env, files, instruction, onProgress, timeoutMs) {
         Authorization: `Bearer ${env.LLM_API_KEY}`,
       },
       body: JSON.stringify({
-        // MODEL DIUPDATE: Hardcode ke deepseek-unrestricted
-        model: "deepseek-unrestricted",
+        model: env.LLM_MODEL, // <-- Menggunakan variabel dari env
         temperature: 0.2,
         max_tokens: Number(env.LLM_MAX_TOKENS || 8000),
         stream: true,
