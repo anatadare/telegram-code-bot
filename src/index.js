@@ -6,7 +6,7 @@ import {
   editMessageText,
 } from "./telegram.js";
 import { unzipToFileMap } from "./zipfiles.js";
-import { editCode, parseEditedFiles, parseExplanations, extractExplanation, chatWithModel } from "./llm.js";
+import { editCode, parseEditedFiles, parseExplanations, extractExplanation, chatWithModel, classifyIntent } from "./llm.js";
 
 const PENDING_TTL_SECONDS = 6 * 60 * 60; // 6 jam
 const CHAT_TTL_SECONDS = 6 * 60 * 60; // 6 jam, sama kayak pending file
@@ -91,12 +91,16 @@ async function handleUpdate(update, env, ctx) {
         "3. Aku proses ke model, lalu kirim balik SETIAP file yang diubah/ditambah " +
         "sebagai file kode terpisah (.js/.css/.jsx/dst -- bukan zip, bukan ditempel jadi teks " +
         "panjang), lengkap sama penjelasan apa yang diubah & fungsinya di tiap file.\n" +
-        "4. Bisa lanjut kasih instruksi lagi buat nge-edit hasil sebelumnya.\n\n" +
+        "4. Bisa lanjut kasih instruksi lagi buat nge-edit hasil sebelumnya -- atau kalau " +
+        "pesannya kedengeran kayak pertanyaan/diskusi (bukan perintah edit), aku otomatis " +
+        "jawab santai tanpa maksa bikin file baru.\n\n" +
         "<b>Mode brainstorming/diskusi:</b>\n" +
         "Belum siap minta edit? Ngobrol aja bebas — kalau belum ada file yang lagi diproses, " +
-        "pesan teks kamu otomatis kuanggap ajakan diskusi (ide fitur, cara mecahin masalah, dst).\n" +
-        "Kalau lagi ADA file pending tapi kamu mau diskusi dulu tanpa langsung nyuruh edit, " +
-        "pakai <code>/brainstorm &lt;pertanyaan/ide kamu&gt;</code>.\n\n" +
+        "pesan teks kamu otomatis kuanggap ajakan diskusi. Kalau lagi ADA file pending, aku " +
+        "otomatis nebak dulu maksud pesan kamu: kalau kedengeran kayak pertanyaan/diskusi, " +
+        "otomatis dijawab tanpa bikin file baru; kalau kedengeran kayak perintah edit, tetap " +
+        "diproses sebagai edit. Bisa juga dipaksa manual pakai " +
+        "<code>/brainstorm &lt;pertanyaan/ide kamu&gt;</code>.\n\n" +
         "<b>Command:</b>\n" +
         "/reset — hapus file & riwayat obrolan yang lagi diproses, mulai dari awal.\n" +
         "/brainstorm &lt;teks&gt; — diskusi bebas, gak akan menghasilkan file.\n" +
@@ -139,9 +143,13 @@ async function handleUpdate(update, env, ctx) {
   }
 
   // User kirim teks biasa:
-  // - Kalau ada file yang lagi pending -> anggap ini instruksi edit buat file itu.
   // - Kalau BELUM ada file pending -> anggap ini ajakan ngobrol/brainstorming biasa,
   //   biar bot tetap enak diajak diskusi walau belum ada file yang mau diedit.
+  // - Kalau ADA file pending -> cek dulu maksud pesannya lewat classifyIntent:
+  //   kalau kelihatannya PERTANYAAN/diskusi (bukan perintah edit konkret), otomatis
+  //   dialihkan ke mode brainstorm (pakai file pending sebagai konteks) TANPA perlu
+  //   user ketik /brainstorm manual. Kalau kelihatannya instruksi edit (atau
+  //   classifier gagal/ragu), tetap jalan seperti biasa: instruksi edit ke file itu.
   if (text) {
     const pending = await getPending(env, chatId);
     if (!pending) {
@@ -156,6 +164,13 @@ async function handleUpdate(update, env, ctx) {
       );
       return;
     }
+
+    const intent = await classifyIntent(env, text);
+    if (intent === "TANYA") {
+      await handleBrainstorm(env, chatId, text);
+      return;
+    }
+    // intent === "EDIT" atau null (classifier gagal/ragu) -> default ke alur edit lama.
     await processInstruction(env, chatId, pending, text);
     return;
   }
@@ -185,7 +200,12 @@ const UPDATE_NOTES =
   "6. <b>Hasil edit kini per-file, bukan zip</b> — tiap file yang diubah/ditambah dikirim " +
   "sebagai file kode sendiri (.js/.css/.jsx/dst), bukan digabung jadi satu .zip atau ditempel " +
   "jadi teks panjang di chat. Tiap file juga dikasih penjelasan singkat: apa yang diubah & " +
-  "apa fungsinya di file itu.";
+  "apa fungsinya di file itu.\n\n" +
+  "7. <b>Auto-deteksi niat pesan</b> — kalau ada file pending dan kamu ngetik sesuatu, bot " +
+  "sekarang nebak dulu (lewat classifier ringan) apakah itu instruksi edit atau sekadar " +
+  "pertanyaan/diskusi soal hasil sebelumnya. Kalau kedengeran kayak pertanyaan, otomatis " +
+  "dijawab lewat mode brainstorm (gak bikin file baru) tanpa kamu harus ketik " +
+  "<code>/brainstorm</code> manual.";
 
 async function handleDocument(message, env, chatId) {
   const doc = message.document;
@@ -407,7 +427,9 @@ async function processInstructionInner(env, chatId, pending, instruction) {
   await sendMessage(
     env,
     chatId,
-    "Mau edit lagi? Langsung kirim instruksi berikutnya. Atau /reset buat mulai dari file baru."
+    "Ada yang mau ditanyain/didiskusiin soal hasil ini? Tinggal chat aja, nanti otomatis " +
+      "kujawab tanpa bikin file baru. Mau edit lagi? Kirim instruksinya langsung. " +
+      "Atau /reset buat mulai dari file baru."
   );
 }
 
