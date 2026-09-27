@@ -110,7 +110,8 @@ export async function chatWithModel(env, history, filesContext, onProgress) {
     });
   }
   messages.push(...history);
-  return callLLM(env, messages, onProgress, "chat");
+  const result = await callLLM(env, messages, onProgress, "chat");
+  return result.content;
 }
 
 const INTENT_SYSTEM_PROMPT = `Kamu adalah classifier niat pesan, bagian dari "Telegram Code-Edit Bot".
@@ -256,7 +257,7 @@ async function callLLMInner(env, messages, onProgress, timeoutMs, label) {
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content;
     if (!content) throw new Error("LLM tidak mengembalikan konten.");
-    return content;
+    return { content, finishReason: data?.choices?.[0]?.finish_reason || null };
   }
 
   const reader = res.body.getReader();
@@ -266,6 +267,7 @@ async function callLLMInner(env, messages, onProgress, timeoutMs, label) {
   let lastFileNotified = null;
   let lastProgressAt = 0;
   let reasoningChars = 0;
+  let finishReason = null;
 
   // Idle timeout PER-CHUNK: AbortController doang ternyata gak selalu berhasil
   // motong reader.read() yang lagi nunggu chunk berikutnya di runtime ini. Jadi
@@ -323,6 +325,11 @@ async function callLLMInner(env, messages, onProgress, timeoutMs, label) {
         }
         const delta = json?.choices?.[0]?.delta?.content;
         const reasoningDelta = json?.choices?.[0]?.delta?.reasoning_content;
+        // finish_reason biasanya muncul di chunk terakhir (kadang tanpa delta
+        // content sama sekali). "length" = kepotong karena kehabisan max_tokens.
+        if (json?.choices?.[0]?.finish_reason) {
+          finishReason = json.choices[0].finish_reason;
+        }
 
         // Model ini kadang "mikir" dulu (reasoning_content) sebelum nulis jawaban
         // beneran (content). Kalau ini diabaikan, status di Telegram gak keupdate
@@ -371,7 +378,10 @@ async function callLLMInner(env, messages, onProgress, timeoutMs, label) {
   }
 
   if (!full) throw new Error("LLM tidak mengembalikan konten.");
-  return full;
+  if (finishReason === "length") {
+    console.log(`[${label}] finish_reason=length -- respons kepotong karena kehabisan max_tokens.`);
+  }
+  return { content: full, finishReason };
 }
 
 function escapeHtmlLocal(str) {
@@ -379,16 +389,38 @@ function escapeHtmlLocal(str) {
 }
 
 // Parse blok ===FILE: path=== ... ===ENDFILE=== jadi { path: text }.
+//
+// Juga mendeteksi FILE yang KEPOTONG: kalau ada "===FILE: xxx===" tapi
+// "===ENDFILE===" penutupnya gak pernah nongol (paling sering karena model
+// kehabisan max_tokens atau ke-timeout di tengah nulis file panjang), sisa
+// teks itu dikembalikan lewat `partial` -- BUKAN cuma dibuang. Ini penting
+// karena sebelumnya, kalau file SATU-SATUNYA di respons kepotong kayak gini,
+// parsed jadi kosong total dan caller nge-dump SELURUH raw response sebagai
+// pesan teks panjang ke user (susah di-copy), padahal isi file yang sempat
+// ditulis model itu masih ada dan masih berguna dikirim sebagai file.
 export function parseEditedFiles(raw) {
   const out = {};
   const re = /===FILE:\s*(.+?)\s*===\r?\n([\s\S]*?)\r?\n?===ENDFILE===/g;
   let match;
+  let lastEnd = 0;
   while ((match = re.exec(raw)) !== null) {
     const path = match[1].trim();
     const content = match[2];
     out[path] = content;
+    lastEnd = re.lastIndex;
   }
-  return out;
+
+  // Cek sisa teks SETELAH blok lengkap terakhir: kalau di situ ada
+  // "===FILE: xxx===" yang gak ketemu "===ENDFILE===" pasangannya, berarti
+  // itu file yang lagi ditulis model pas responsnya kepotong.
+  let partial = null;
+  const tail = raw.slice(lastEnd);
+  const openMatch = tail.match(/===FILE:\s*(.+?)\s*===\r?\n([\s\S]*)$/);
+  if (openMatch && openMatch[2].trim()) {
+    partial = { path: openMatch[1].trim(), content: openMatch[2] };
+  }
+
+  return { files: out, partial };
 }
 
 // Parse blok ===EXPLAIN: path=== ... ===ENDEXPLAIN=== jadi { path: penjelasan }.
