@@ -113,6 +113,70 @@ export async function chatWithModel(env, history, filesContext, onProgress) {
   return callLLM(env, messages, onProgress, "chat");
 }
 
+const INTENT_SYSTEM_PROMPT = `Kamu adalah classifier niat pesan, bagian dari "Telegram Code-Edit Bot".
+User SEDANG PUNYA file kode yang lagi diproses bot ini (baru selesai diedit atau baru diupload),
+dan barusan mengirim pesan teks susulan. Tugasmu CUMA menentukan niat pesan itu, bukan menjawabnya.
+
+- Balas "EDIT" kalau pesan itu memerintahkan PERUBAHAN KONKRET ke code: menambah, mengubah,
+  menghapus, memperbaiki bug, refactor, rename, dan sejenisnya.
+- Balas "TANYA" kalau pesan itu BUKAN perintah perubahan konkret: bertanya, minta penjelasan
+  soal hasil edit sebelumnya, minta pendapat/opsi, ngobrol/brainstorming, atau basa-basi.
+
+Kalau ragu antara dua itu, pilih "EDIT" (lebih aman salah nanya balik daripada salah diemin
+instruksi edit beneran).
+
+Balas HANYA dengan satu kata, PERSIS salah satu dari ini, tanpa tanda baca atau penjelasan
+apapun: EDIT atau TANYA`;
+
+// Classifier ringan (non-streaming, jawaban super pendek) buat nentuin pesan
+// susulan user itu instruksi edit atau pertanyaan/diskusi biasa. Dipanggil TIAP
+// ada teks masuk sementara ada file pending -- makanya sengaja dibikin murah:
+// max_tokens kecil, stream:false, timeout pendek sendiri (gak numpang ke
+// LLM_TIMEOUT_MS yang buat proses edit lama).
+// Return: "EDIT" | "TANYA" | null (null = gagal/gak jelas -> caller sebaiknya
+// anggap "EDIT" biar perilaku lama gak berubah kalau classifier lagi ngadat).
+export async function classifyIntent(env, instruction) {
+  const timeoutMs = Number(env.LLM_INTENT_TIMEOUT_MS || 20000);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${env.LLM_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.LLM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: env.LLM_MODEL,
+        temperature: 0,
+        max_tokens: 10,
+        stream: false,
+        messages: [
+          { role: "system", content: INTENT_SYSTEM_PROMPT },
+          { role: "user", content: instruction },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.log(`[classifyIntent] API error ${res.status}, fallback ke default caller.`);
+      return null;
+    }
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content || "";
+    const normalized = content.trim().toUpperCase();
+    if (normalized.includes("TANYA")) return "TANYA";
+    if (normalized.includes("EDIT")) return "EDIT";
+    console.log(`[classifyIntent] jawaban gak jelas: ${JSON.stringify(content).slice(0, 100)}`);
+    return null;
+  } catch (err) {
+    console.log("[classifyIntent] gagal/timeout:", err && err.message ? err.message : err);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Wrapper hard-deadline yang dipakai kedua mode (edit & chat) -- lihat catatan
 // panjang di bawah soal kenapa perlu timer independen di luar AbortController.
 async function callLLM(env, messages, onProgress, label) {
